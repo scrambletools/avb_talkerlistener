@@ -1,0 +1,3 @@
+[submodule "components/atdecc"]
+	path = components/atdecc
+	url = https://github.com/scrambletools/atdecc.git
