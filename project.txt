@@ -1,0 +1,38 @@
+Project Description
+
+This project is an implementation of an AVB talker and listener end station for ESP32. The initial implementation will not require a 1588 capable Ethernet PHY, and so some gPTP functionality will be stubbed out. Eventually a 1588 capable PHY will be supported. 
+
+Suitable ESP32 test device (aka ESP-TD):
+JacobsParts WT32-ETH01 ESP32 Module Ethernet WiFi Bluetooth Development Board.
+
+The test device should be able to interoperate with a HIVE controller app on the same LAN.
+Hive: https://github.com/christophe-calmejane/Hive
+
+Testing should be performed using the HIVE app on a PC or Mac and 2 ESP-TDs connected to the same LAN. The ESP-TD will run a main app that uses the Scramble ATDECC library as an ESP-IDF component to manage all ATDECC communication with HIVE controller app and any other ESP-TDs on the same network.
+ATDECC lib: https://github.com/scrambletools/atdecc
+
+In AVB there are 4 roles which any AVB entity may perfom: talker, listener controller, and responder. For this project, only the talker, listener and responder roles will be performed by the ESP-TD. The HIVE app for PC/Mac will be used as the controller, and the ESP-TDs will respond to requests from the controller and perfom all coordination between controller and devicdes to enable AVTP streams between each talker and listener. An AVB controller discovers any talkers and listeners on the LAN and then it can send them commands to connect a listener to a talker and start streaming. Controllers can send many different commands such as volume control and custom vendor-specific commands, but the most common commands are part of the ATDECC standard protocol. Examples of different kinds of AVB-related messages are provided in a C file for reference.
+
+The ESP-TD main app should have a config.toml file with config settings for device description data. The implementation will not use hard-coded values. All values should be read from the config.toml.
+A test audio file test_audio.wav will be used for streaming tests.
+
+AVB TalkerListener Operation
+Note: 2 ESP-TDs are required to fully test all functions
+——————————————
+Step 1: ESP-TD: boots up, enables ethernet link, sends an ENTITY_AVAILABLE message in order to be discovered as an AVB talker and listener by the HIVE controller on the same LAN
+Step 2: HIVE: sees the ENTITY_AVAILABLE message and sends an AEM command GET_CONFIGURATION to the ESP32
+Step 3: ESP-TD: test app responds to controller with config info
+Step 4: HIVE: sends several AEM commands for entity description info
+Step 5: ESP-TD test app responds to all HIVE requests for entity description info
+Step 6: HIVE: should display the discovered entity with all description info
+Step 7: ESP-TD: sends updates to the controller when state changes or as requested by HIVE app
+Step 8: In HIVE app UI the user connects each talker to each listener.
+Step 9: For each ESP-TD, listener receives connection command from HIVE app and listener sends command to talker to connect.
+Step 10: For each ESP-TD, talker responds to listener successfully.
+Step 11: For each ESP-TD, talker and listener update controller with status. Stream can be simulated.
+Step 12: In HIVE app UI the user disconnects a talker from a listener.
+Step 13: The corresponding listener from STEP 12 receives disconnection command from HIVE app and listener sends command to corresponding talker to disconnect.
+Step 14: Talker responds to listener successfully.
+Step 15: Talker and listener update controller with status.
+PERPETUAL STATE: Both ESP-TDs continue to operate to allow STEP 8 through 15 as a result of ongoing interaction via the HIVE controller.
+Step 16: If one ESP-TD is physically disconnected from the LAN, then the other ESP-TD will quickly timeout any existing connection.
