@@ -3,9 +3,134 @@
 #include "protocolAemAecpdu.hpp"
 #include "protocolAemPayloads.hpp"
 #include "protocolDefines.hpp"
-#include <lwip/err.h>
-#include <lwip/netdb.h>
-#include <lwip/sockets.h>
+#include "esp_eth.h"
+#include "esp_vfs_l2tap.h"
+#include "lwip/prot/ethernet.h" // Ethernet header
+#include "lwip/ip_addr.h"
+
+// for l2tap
+#define ETH_INTERFACE   "ETH_DEF"
+#define INVALID_FD      -1
+
+// Define logging tag
+static const char *TAG = "TL";
+
+// Opens and configures L2 TAP file descriptor for sending
+static int init_l2tap_fd_for_sending()
+{
+    int fd = open("/dev/net/tap", 0);
+    if (fd < 0) {
+        ESP_LOGE(TAG, "Unable to open L2 TAP interface: errno %d", errno);
+        goto error;
+    }
+    ESP_LOGI(TAG, "/dev/net/tap fd %d successfully opened", fd);
+
+    // Configure Ethernet interface to use with L2TAP
+    int ret;
+    if ((ret = ioctl(fd, L2TAP_S_INTF_DEVICE, ETH_INTERFACE)) == -1) {
+        ESP_LOGE(TAG, "Unable to bind L2 TAP fd %d with Ethernet device: errno %d", fd, errno);
+        goto error;
+    }
+    ESP_LOGI(TAG, "L2 TAP fd %d successfully bound to %s", fd, ETH_INTERFACE);
+    return fd;
+error:
+    if (fd != INVALID_FD) {
+        close(fd);
+    }
+    return INVALID_FD;
+}
+
+// Opens and configures L2 TAP file descriptor
+static int init_l2tap_fd(int flags, uint16_t eth_type_filter)
+{
+    int fd = open("/dev/net/tap", flags);
+    if (fd < 0) {
+        ESP_LOGE(TAG, "Unable to open L2 TAP interface: errno %d", errno);
+        goto error;
+    }
+    ESP_LOGI(TAG, "/dev/net/tap fd %d successfully opened", fd);
+
+    // Check fd block status (just for demonstration purpose)
+    flags = 0;
+    flags = fcntl(fd, F_GETFL);
+    if (flags == -1) {
+        ESP_LOGE(TAG, "Unable to get L2 TAP fd %d status flag: errno %d", fd, errno);
+        goto error;
+    }
+    if (flags & O_NONBLOCK) {
+        ESP_LOGI(TAG, "L2 TAP fd %d configured in non-blocking mode", fd);
+    } else {
+        ESP_LOGI(TAG, "L2 TAP fd %d configured in blocking mode", fd);
+    }
+
+    // Configure Ethernet interface on which to get raw frames
+    int ret;
+    if ((ret = ioctl(fd, L2TAP_S_INTF_DEVICE, ETH_INTERFACE)) == -1) {
+        ESP_LOGE(TAG, "Unable to bound L2 TAP fd %d with Ethernet device: errno %d", fd, errno);
+        goto error;
+    }
+    ESP_LOGI(TAG, "L2 TAP fd %d successfully bound to `%s`", fd, ETH_INTERFACE);
+
+    // Configure Ethernet frames we want to filter out
+    if ((ret = ioctl(fd, L2TAP_S_RCV_FILTER, &eth_type_filter)) == -1) {
+        ESP_LOGE(TAG, "Unable to configure fd %d Ethernet type receive filter: errno %d", fd, errno);
+        goto error;
+    }
+    ESP_LOGI(TAG, "L2 TAP fd %d Ethernet type filter configured to 0x%x", fd, eth_type_filter);
+
+    return fd;
+error:
+    if (fd != INVALID_FD) {
+        close(fd);
+    }
+    return INVALID_FD;
+}
+
+// non-blocking l2tap select
+static void eth_frame_logger(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Started task to log frames.");
+    uint8_t rx_buffer[128];
+    int eth_tap_fd;
+    
+    // Open and configure L2 TAP File descriptor
+    if ((eth_tap_fd = init_l2tap_fd(1, AVTP_ETHER_TYPE)) == INVALID_FD) {
+        goto error;
+    }
+
+    while (1) {
+        struct timeval tv;
+        tv.tv_sec = 5;
+        tv.tv_usec = 0;
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(eth_tap_fd, &rfds);
+
+        int ret_sel = select(eth_tap_fd + 1, &rfds, NULL, NULL, &tv);
+        if (ret_sel > 0) {
+            ssize_t len = read(eth_tap_fd, rx_buffer, sizeof(rx_buffer));
+            if (len > 0) {
+                eth_frame_t *recv_msg = (eth_frame_t *)rx_buffer;
+                ESP_LOGI(TAG, "fd %d received %d bytes from %.2x:%.2x:%.2x:%.2x:%.2x:%.2x", eth_tap_fd,
+                            len, recv_msg->header.src.addr[0], recv_msg->header.src.addr[1], recv_msg->header.src.addr[2],
+                            recv_msg->header.src.addr[3], recv_msg->header.src.addr[4], recv_msg->header.src.addr[5]);
+
+            } else {
+                ESP_LOGE(TAG, "L2 TAP fd %d read error: errno %d", eth_tap_fd, errno);
+                break;
+            }
+        } else if (ret_sel == 0) {
+            ESP_LOGD(TAG, "L2 TAP select timeout");
+        } else {
+            ESP_LOGE(TAG, "L2 TAP select error: errno %d", errno);
+            break;
+        }
+    }
+    close(eth_tap_fd);
+error:
+    vTaskDelete(NULL);
+}
 
 AemHandler::AemHandler(Entity const& entity, EntityTree const* const entityModelTree)
     : _entity{ entity }
@@ -21,19 +146,19 @@ void AemHandler::validateEntityModel(EntityTree const* const entityModelTree)
     if (entityModelTree != nullptr)
     {
         // Check there is at least one configuration descriptor
-        auto const countConfigs = static_cast<DescriptorIndex>(entityModelTree->configurationTrees.size());
-        if (countConfigs == 0)
-        {
-            ESP_LOGE("AEM-HANDLER", "Invalid Entity Model: At least one ConfigurationDescriptor is required");
-            return;
-        }
+        // auto const countConfigs = static_cast<DescriptorIndex>(entityModelTree->configurationTrees.size());
+        // if (countConfigs == 0)
+        // {
+        //     ESP_LOGE("AEM-HANDLER", "Invalid Entity Model: At least one ConfigurationDescriptor is required");
+        //     return;
+        // }
 
-        // Check the current configuration index is in the correct range
-        if (entityModelTree->dynamicModel.currentConfiguration >= countConfigs)
-        {
-            ESP_LOGE("AEM-HANDLER", "Invalid Entity Model: Current Configuration Index is out of range");
-            return;
-        }
+        // // Check the current configuration index is in the correct range
+        // if (entityModelTree->dynamicModel.currentConfiguration >= countConfigs)
+        // {
+        //     ESP_LOGE("AEM-HANDLER", "Invalid Entity Model: Current Configuration Index is out of range");
+        //     return;
+        // }
     }
 }
 
@@ -168,64 +293,34 @@ ConfigurationDescriptor AemHandler::buildConfigurationDescriptor(ConfigurationIn
 AtdeccTalkerListener::AtdeccTalkerListener(Entity const& entity, EntityTree const* entityModelTree)
     : entity_(entity),
       state_(AtdeccState::UNINITIALIZED),  // Initialize AemHandler
-      socket_fd_(-1),
+      l2tap_fd_(-1),
       aemHandler_(entity, entityModelTree)
 {
     memset(&local_addr_, 0, sizeof(local_addr_));
-    memset(&remote_addr_, 0, sizeof(remote_addr_));
+    memset(&remote_talker_addr_, 0, sizeof(remote_talker_addr_));
+    memset(&remote_listener_addr_, 0, sizeof(remote_listener_addr_));
 }
 
 // Destructor
 AtdeccTalkerListener::~AtdeccTalkerListener()
 {
-    if (socket_fd_ >= 0)
+    if (l2tap_fd_ >= 0)
     {
-        close(socket_fd_);
+        close(l2tap_fd_);
     }
 }
 
-// Initialize the Talker/Listener for Broadcast
-esp_err_t AtdeccTalkerListener::initialize()
+// Initialize the Talker/Listener
+esp_err_t AtdeccTalkerListener::initialize(esp_eth_handle_t eth_handle)
 {
-    // Create a UDP socket
-    socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);  // Use SOCK_DGRAM for UDP
-    if (socket_fd_ < 0) {
-        ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
+    // Initialize L2 TAP VFS interface
+    ESP_ERROR_CHECK(esp_vfs_l2tap_intf_register(NULL));
+
+    if ((l2tap_fd_ = init_l2tap_fd_for_sending()) == INVALID_FD) {
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "Socket created successfully");
-
-    // Enable broadcasting on the socket
-    int broadcast_enable = 1;
-    if (setsockopt(socket_fd_, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)) < 0) {
-        ESP_LOGE(TAG, "Failed to enable broadcast: errno %d", errno);
-        close(socket_fd_);
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "Broadcast enabled on socket");
-
-    // Set up the local address to bind to
-    struct sockaddr_in local_addr;
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_port = htons(ATDECC_DEFAULT_PORT);  // Bind to the desired port
-    local_addr.sin_addr.s_addr = INADDR_ANY;  // Bind to any local IP address
-
-    // Bind the socket to the local address and port
-    if (bind(socket_fd_, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
-        ESP_LOGE(TAG, "Socket bind failed: errno %d", errno);
-        close(socket_fd_);
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "Socket bound to port %d", ATDECC_DEFAULT_PORT);
-
-    // Set the remote address for broadcasting
-    memset(&remote_addr_, 0, sizeof(remote_addr_));
-    remote_addr_.sin_family = AF_INET;
-    remote_addr_.sin_port = htons(ATDECC_DEFAULT_PORT);  // Set remote port
-    remote_addr_.sin_addr.s_addr = inet_addr("192.168.8.255");  // Broadcast address (can change for subnet-specific)
-
-    ESP_LOGI(TAG, "Broadcasting to port %d", ATDECC_DEFAULT_PORT);
-
+    eth_handle_ = eth_handle;
+    
     // Set initial state
     state_ = AtdeccState::DISCOVERED;
     return ESP_OK;
@@ -291,61 +386,45 @@ AtdeccState AtdeccTalkerListener::getState() const
     return state_;
 }
 
-// Create and configure the socket
-esp_err_t AtdeccTalkerListener::createSocket()
+// Create ethernet frame
+void AtdeccTalkerListener::createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t eth_type, const unsigned char payload[44], eth_frame_t *frame, int len)
 {
-    // Create UDP socket
-    socket_fd_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (socket_fd_ < 0)
-    {
-        ESP_LOGE(TAG, "Failed to create socket");
-        return ESP_FAIL;
-    }
-
-    // Configure local address
-    local_addr_.sin_family = AF_INET;
-    local_addr_.sin_addr.s_addr = htonl(INADDR_ANY);
-    local_addr_.sin_port = htons(ATDECC_DEFAULT_PORT);
-    return ESP_OK;
+    // Set source address equal to our MAC address
+    uint8_t mac_addr[ETH_ADDR_LEN];
+    esp_eth_ioctl(eth_handle_, ETH_CMD_G_MAC_ADDR, mac_addr);
+    memcpy(frame->header.src.addr, mac_addr, ETH_ADDR_LEN);
+    // Set destination address equal to source address from where the frame was received
+    memcpy(frame->header.dest.addr, dest_addr, ETH_ADDR_LEN);
+    // Set Ethernet type
+    frame->header.type = htons(eth_type); // convert to big endian (network) byte order
+    // Copy the payload data
+    //memset(frame->payload, 0, len - ETH_HEADER_LEN);
+    memcpy(frame->payload, payload, len - ETH_HEADER_LEN);
+    uint8_t subtype[2] = { 0xfa, 0x00 };
+    memcpy(frame->payload, subtype, (2));
 }
 
-// Bind the socket to the local address
-esp_err_t AtdeccTalkerListener::bindSocket()
+// Send a frame
+esp_err_t AtdeccTalkerListener::sendFrame(const std::vector<uint8_t>& payload)
 {
-    if (bind(socket_fd_, (struct sockaddr*)&local_addr_, sizeof(local_addr_)) < 0)
-    {
-        ESP_LOGE(TAG, "Failed to bind socket");
-        close(socket_fd_);
+    // Construct frame
+    eth_frame_t frame;
+    eth_frame_t *pframe = &frame;
+    uint16_t eth_type = AVTP_ETHER_TYPE;
+    ESP_LOGI(TAG, "Sending payload with size: %d", payload.size());
+    ssize_t len = payload.size() + ETH_HEADER_LEN;
+    createFrame(remote_listener_addr_, eth_type, payload.data(), pframe, len);
+    
+    // Send the frame
+    ESP_LOG_BUFFER_HEX(TAG, pframe->header.src.addr, ETH_ADDR_LEN);
+    ESP_LOG_BUFFER_HEX(TAG, pframe->header.dest.addr, ETH_ADDR_LEN);
+    ESP_LOG_BUFFER_HEX(TAG, &pframe->header.type, sizeof(uint16_t));
+    ESP_LOG_BUFFER_HEX(TAG, pframe->payload, len - ETH_HEADER_LEN);
+    ssize_t ret = write(l2tap_fd_, pframe, len);
+    if (ret < 0) {
+        ESP_LOGE(TAG, "L2 TAP fd %d write error: errno: %d", l2tap_fd_, errno);
         return ESP_FAIL;
     }
-    return ESP_OK;
-}
-
-// Receive a packet
-esp_err_t AtdeccTalkerListener::receivePacket(std::vector<uint8_t>& packet)
-{
-    uint8_t buffer[1024];
-    socklen_t addr_len = sizeof(remote_addr_);
-    int len = recvfrom(socket_fd_, buffer, sizeof(buffer), 0, (struct sockaddr*)&remote_addr_, &addr_len);
-    if (len < 0)
-    {
-        ESP_LOGE(TAG, "Failed to receive packet");
-        return ESP_FAIL;
-    }
-
-    packet.assign(buffer, buffer + len);
-    return ESP_OK;
-}
-
-// Send a packet
-esp_err_t AtdeccTalkerListener::sendPacket(const std::vector<uint8_t>& packet)
-{
-    int len = sendto(socket_fd_, packet.data(), packet.size(), 0, (struct sockaddr*)&remote_addr_, sizeof(remote_addr_));
-	if (len < 0)
-	{
-	    ESP_LOGE(TAG, "Failed to send packet: errno %d", errno);
-	    return ESP_FAIL;
-	}
     return ESP_OK;
 }
 
@@ -387,29 +466,30 @@ void printBuffer(const std::vector<uint8_t>& buffer)
     }
 }
 
-// Send an ADP message over the network
+// Send an ADP message
 void AtdeccTalkerListener::sendAdpMessage(const Adpdu& adpMessage)
 {
     std::vector<uint8_t> buffer(Adpdu::Length);
     adpMessage.serialize(buffer.data()); // Serialize the ADPDU to the buffer
     //printBuffer(buffer);
-    sendPacket(buffer); // Send the serialized buffer over the network
+    sendFrame(buffer); // Send the serialized buffer
 }
 
-// Send an ADP message over the network
+// Send an ACMP message
 void AtdeccTalkerListener::sendAcmpMessage(const Acmpdu& acmpMessage)
 {
     std::vector<uint8_t> buffer(Adpdu::Length);
     acmpMessage.serialize(buffer.data()); // Serialize the ADPDU to the buffer
     //printBuffer(buffer);
-    sendPacket(buffer); // Send the serialized buffer over the network
+    sendFrame(buffer); // Send the serialized buffer over the network
 }
 
 // Handle incoming ADPDU messages by deserializing and processing
 void AtdeccTalkerListener::receiveAndHandleAdpMessage()
 {
     std::vector<uint8_t> buffer;
-    if (receivePacket(buffer) == ESP_OK)
+    //if (receiveFrame(buffer) == ESP_OK)
+    if (false) // FIXME
     {
         Adpdu adpMessage;
         adpMessage.deserialize(buffer.data()); // Deserialize buffer into an ADPDU object
@@ -455,13 +535,14 @@ void AtdeccTalkerListener::sendAemResponse(const AemAecpdu& response)
 {
     std::vector<uint8_t> buffer(AemAecpdu::MAXIMUM_SEND_PAYLOAD_BUFFER_LENGTH);
     response.serialize(buffer.data(), buffer.size()); // Serialize response into buffer
-    sendPacket(buffer); // Send the serialized buffer over the network
+    sendFrame(buffer); // Send the serialized buffer over the network
 }
 
 void AtdeccTalkerListener::handleAemMessage()
 {
     std::vector<uint8_t> buffer;
-    if (receivePacket(buffer) == ESP_OK)
+    //if (receiveFrame(buffer) == ESP_OK)
+    if (false) // FIXME
     {
         AemAecpdu aemMessage(0);
         aemMessage.deserialize(buffer.data(), buffer.size()); // Deserialize the buffer into an AEM message
@@ -556,8 +637,7 @@ void AtdeccTalkerListener::handleLockEntity(const AemAecpdu& aemMessage)
     }
 }
 
-
-/*// Helper function to handle SET_CONFIGURATION command
+// Helper function to handle SET_CONFIGURATION command
 void AtdeccTalkerListener::handleSetConfiguration(const AemAecpdu& aemMessage)
 {
     ESP_LOGI(TAG, "Processing Set Configuration command.");
@@ -565,7 +645,7 @@ void AtdeccTalkerListener::handleSetConfiguration(const AemAecpdu& aemMessage)
     
     // Set the configuration for the entity
     // Example: set the configuration for a stream or descriptor
-    ESP_LOGI(TAG, "Setting configuration index %d.", configurationIndex);
+    ESP_LOGI(TAG, "Setting configuration index %d. [NEED TO IMPLEMENT]", configurationIndex);
     // Entity-specific logic for setting configuration goes here
 }
 
@@ -585,8 +665,7 @@ void AtdeccTalkerListener::handleSetStreamFormat(const AemAecpdu& aemMessage)
 {
     ESP_LOGI(TAG, "Processing Set Stream Format command.");
     auto [descriptorType, descriptorIndex, streamFormat] = deserializeSetStreamFormatCommand(aemMessage.getPayload());
-
-    if (entity_.setEntityCapabilities().test(EntityCapability::ClassASupported))
+    if (entity_.getEntityCapabilities().hasFlag(EntityCapability::ClassASupported))
     {
         // Set the stream format for the entity
         ESP_LOGI(TAG, "Stream format set for descriptor %d.", descriptorIndex);
@@ -605,7 +684,7 @@ void AtdeccTalkerListener::handleGetStreamFormat(const AemAecpdu& aemMessage)
     auto [descriptorType, descriptorIndex] = deserializeGetStreamFormatCommand(aemMessage.getPayload());
 
     // Retrieve the stream format for the entity
-    StreamFormat currentStreamFormat = StreamFormat::defaultStreamFormat();
+    StreamFormat currentStreamFormat = StreamFormat::getNullStreamFormat(); // FIXME
     AemAecpdu response = serializeGetStreamFormatResponse(descriptorType, descriptorIndex, currentStreamFormat).data();
     
     sendAemResponse(response);
@@ -628,9 +707,10 @@ void AtdeccTalkerListener::handleGetName(const AemAecpdu& aemMessage)
     ESP_LOGI(TAG, "Processing Get Name command.");
     auto [descriptorType, descriptorIndex, nameIndex, configurationIndex] = deserializeGetNameCommand(aemMessage.getPayload());
 
+    // FIXME
     // Retrieve the name of the entity or descriptor
-    AtdeccFixedString name = "EntityName"; // Example name
-    AemAecpdu response = serializeGetNameResponse(descriptorType, descriptorIndex, nameIndex, configurationIndex, name);
+    //AtdeccFixedString name = (AtdeccFixedString)"Unknown"; // FIXME get actual name
+    //AemAecpdu response = serializeGetNameResponse(descriptorType, descriptorIndex, nameIndex, configurationIndex, name);
     
-    sendAemResponse(response);
-}*/
+    //sendAemResponse(response);
+}

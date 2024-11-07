@@ -12,7 +12,7 @@
 #include <esp_system.h>
 #include <esp_log.h>
 #include <esp_err.h>
-#include "lwip/sockets.h"
+#include "esp_eth.h"
 #include "protocolAdpdu.hpp"
 #include "protocolAcmpdu.hpp"
 #include "entity.hpp"
@@ -20,14 +20,24 @@
 #include "entityEnums.hpp"
 #include "protocolAemPayloads.hpp"
 #include "sdkconfig.h"
+#include "lwip/prot/ethernet.h" // Ethernet header
 
 // Constants
 constexpr std::uint16_t AVTP_ETHERTYPE = 0x22f0;  // AVTP Ethertype
 constexpr std::uint16_t ATDECC_DEFAULT_PORT = 17221;  // ATDECC default UDP port
 constexpr std::uint32_t ENTITY_ID = static_cast<std::uint32_t>(0x001b92fffe01b930);  // Placeholder entity ID
-constexpr std::uint64_t ENTITY_MODEL_ID = static_cast<std::uint64_t>(0x123456789ABCDEF);  // Placeholder entity ID
-constexpr std::uint16_t ENTITY_CAPABILITIES = static_cast<std::uint16_t>(0x123456);
+constexpr std::uint64_t ENTITY_MODEL_ID = static_cast<std::uint64_t>(0x123456789abcdef);  // Placeholder entity ID
+constexpr std::uint16_t ENTITY_CAPABILITIES = static_cast<std::uint16_t>(0x0000858a);
 constexpr std::uint32_t INTERFACE_VERSION = 304;
+
+// Basic ethernet frame struct
+typedef struct {
+    struct eth_hdr header;
+    char payload[500];
+} eth_frame_t;
+
+// Global Ethernet handle
+static esp_eth_handle_t eth_handle = NULL;
 
 // Enumeration for ATDECC states
 enum class AtdeccState : std::uint8_t
@@ -38,6 +48,10 @@ enum class AtdeccState : std::uint8_t
     CONNECTED,
     DISCONNECTED
 };
+
+static int init_l2tap_fd_for_sending();
+static int init_l2tap_fd(int flags, uint16_t eth_type_filter);
+static void eth_frame_logger(void *pvParameters);
 
 class AemHandler final
 {
@@ -72,7 +86,7 @@ public:
     ~AtdeccTalkerListener();
 
     // Initialization
-    esp_err_t initialize();
+    esp_err_t initialize(esp_eth_handle_t eth_handle);
 
     // ATDECC Operations
     esp_err_t discover();
@@ -100,21 +114,22 @@ private:
     AtdeccState state_;
     
     // Networking
-    int socket_fd_;
-    struct sockaddr_in local_addr_;
-    struct sockaddr_in remote_addr_;
+    int l2tap_fd_;
+    esp_eth_handle_t eth_handle_;
+
+    uint8_t local_addr_[ETH_ADDR_LEN];
+    uint8_t remote_talker_addr_[ETH_ADDR_LEN];
+    uint8_t remote_listener_addr_[ETH_ADDR_LEN];
 
     // AemHandler instance
     AemHandler aemHandler_;  // <-- New instance of AemHandler
 
     // Helper Methods
-    esp_err_t createSocket();
-    esp_err_t bindSocket();
-    esp_err_t receivePacket(std::vector<uint8_t>& packet);
-    esp_err_t sendPacket(const std::vector<uint8_t>& packet);
+    void createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t eth_type, const unsigned char payload[44], eth_frame_t *frame, int len);
+    esp_err_t sendFrame(const std::vector<uint8_t>& payload);
 
     // Logging Tag
-    static constexpr const char* TAG = "ATDECC_TALKER_LISTENER";
+    static constexpr const char* TAG = "TL";
     
     // Handle ADP message
     void handleAdpMessage(const Adpdu& adpMessage);
