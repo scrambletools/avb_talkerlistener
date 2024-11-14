@@ -23,8 +23,6 @@
 #include "lwip/prot/ethernet.h" // Ethernet header
 
 // Constants
-constexpr std::uint16_t AVTP_ETHERTYPE = 0x22f0;  // AVTP Ethertype
-constexpr std::uint16_t ATDECC_DEFAULT_PORT = 17221;  // ATDECC default UDP port
 constexpr std::uint32_t ENTITY_ID = static_cast<std::uint32_t>(0x001b92fffe01b930);  // Placeholder entity ID
 constexpr std::uint64_t ENTITY_MODEL_ID = static_cast<std::uint64_t>(0x123456789abcdef);  // Placeholder entity ID
 constexpr std::uint16_t ENTITY_CAPABILITIES = static_cast<std::uint16_t>(0x0000858a);
@@ -33,7 +31,7 @@ constexpr std::uint32_t INTERFACE_VERSION = 304;
 // Basic ethernet frame struct
 typedef struct {
     struct eth_hdr header;
-    char payload[500];
+    uint8_t payload[AVTP_MAX_PAYLOAD_LENGTH];
 } eth_frame_t;
 
 // Global Ethernet handle
@@ -125,8 +123,9 @@ private:
     AemHandler aemHandler_;  // <-- New instance of AemHandler
 
     // Helper Methods
-    void createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t eth_type, const unsigned char payload[44], eth_frame_t *frame, int len);
-    esp_err_t sendFrame(const std::vector<uint8_t>& payload);
+    void createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t eth_type, SerBuffer& payload, eth_frame_t *frame, int len);
+    //esp_err_t sendFrame(const std::vector<uint8_t>& payload);
+    esp_err_t sendFrame(SerBuffer& payload);
 
     // Logging Tag
     static constexpr const char* TAG = "TL";

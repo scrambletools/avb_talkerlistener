@@ -115,7 +115,6 @@ static void eth_frame_logger(void *pvParameters)
                 ESP_LOGI(TAG, "fd %d received %d bytes from %.2x:%.2x:%.2x:%.2x:%.2x:%.2x", eth_tap_fd,
                             len, recv_msg->header.src.addr[0], recv_msg->header.src.addr[1], recv_msg->header.src.addr[2],
                             recv_msg->header.src.addr[3], recv_msg->header.src.addr[4], recv_msg->header.src.addr[5]);
-
             } else {
                 ESP_LOGE(TAG, "L2 TAP fd %d read error: errno %d", eth_tap_fd, errno);
                 break;
@@ -387,7 +386,7 @@ AtdeccState AtdeccTalkerListener::getState() const
 }
 
 // Create ethernet frame
-void AtdeccTalkerListener::createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t eth_type, const unsigned char payload[44], eth_frame_t *frame, int len)
+void AtdeccTalkerListener::createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t eth_type, SerBuffer& payload, eth_frame_t *frame, int len)
 {
     // Set source address equal to our MAC address
     uint8_t mac_addr[ETH_ADDR_LEN];
@@ -398,33 +397,32 @@ void AtdeccTalkerListener::createFrame(uint8_t dest_addr[ETH_ADDR_LEN], uint16_t
     // Set Ethernet type
     frame->header.type = htons(eth_type); // convert to big endian (network) byte order
     // Copy the payload data
-    //memset(frame->payload, 0, len - ETH_HEADER_LEN);
-    memcpy(frame->payload, payload, len - ETH_HEADER_LEN);
-    uint8_t subtype[2] = { 0xfa, 0x00 };
-    memcpy(frame->payload, subtype, (2));
+    memcpy(frame->payload, payload.data(), len - ETH_HEADER_LEN);
+    //uint8_t subtype[2] = { 0xfa, 0x00 };
+    //memcpy(frame->payload, subtype, (2));
 }
 
 // Send a frame
-esp_err_t AtdeccTalkerListener::sendFrame(const std::vector<uint8_t>& payload)
+esp_err_t AtdeccTalkerListener::sendFrame(SerBuffer& payload)
 {
     // Construct frame
-    eth_frame_t frame;
-    eth_frame_t *pframe = &frame;
-    uint16_t eth_type = AVTP_ETHER_TYPE;
+    //eth_frame_t frame;
+    //eth_frame_t *pframe = &frame;
+    //uint16_t eth_type = AVTP_ETHER_TYPE;
     ESP_LOGI(TAG, "Sending payload with size: %d", payload.size());
-    ssize_t len = payload.size() + ETH_HEADER_LEN;
-    createFrame(remote_listener_addr_, eth_type, payload.data(), pframe, len);
+    //ssize_t len = payload.size() + ETH_HEADER_LEN;
+    // createFrame(remote_listener_addr_, eth_type, payload, pframe, len);
     
     // Send the frame
-    ESP_LOG_BUFFER_HEX(TAG, pframe->header.src.addr, ETH_ADDR_LEN);
-    ESP_LOG_BUFFER_HEX(TAG, pframe->header.dest.addr, ETH_ADDR_LEN);
-    ESP_LOG_BUFFER_HEX(TAG, &pframe->header.type, sizeof(uint16_t));
-    ESP_LOG_BUFFER_HEX(TAG, pframe->payload, len - ETH_HEADER_LEN);
-    ssize_t ret = write(l2tap_fd_, pframe, len);
-    if (ret < 0) {
-        ESP_LOGE(TAG, "L2 TAP fd %d write error: errno: %d", l2tap_fd_, errno);
-        return ESP_FAIL;
-    }
+    // ESP_LOG_BUFFER_HEX(TAG, pframe->header.src.addr, ETH_ADDR_LEN);
+    // ESP_LOG_BUFFER_HEX(TAG, pframe->header.dest.addr, ETH_ADDR_LEN);
+    // ESP_LOG_BUFFER_HEX(TAG, &pframe->header.type, sizeof(uint16_t));
+    // ESP_LOG_BUFFER_HEX(TAG, pframe->payload, payload.size());
+    // ssize_t ret = write(l2tap_fd_, pframe, len);
+    // if (ret < 0) {
+    //     ESP_LOGE(TAG, "L2 TAP fd %d write error: errno: %d", l2tap_fd_, errno);
+    //     return ESP_FAIL;
+    // }
     return ESP_OK;
 }
 
@@ -469,19 +467,24 @@ void printBuffer(const std::vector<uint8_t>& buffer)
 // Send an ADP message
 void AtdeccTalkerListener::sendAdpMessage(const Adpdu& adpMessage)
 {
-    std::vector<uint8_t> buffer(Adpdu::Length);
-    adpMessage.serialize(buffer.data()); // Serialize the ADPDU to the buffer
+    //std::vector<uint8_t> buffer(Adpdu::Length);
+    SerBuffer buffer;
+    //serialize<Adpdu>(adpMessage, buffer);
+    adpMessage.serialize(buffer); // Serialize the ADPDU to the buffer
     //printBuffer(buffer);
-    sendFrame(buffer); // Send the serialized buffer
+    ESP_LOGI(TAG, "buffer size %d", buffer.size());
+    
+    //sendFrame(buffer); // Send the serialized buffer
 }
 
 // Send an ACMP message
 void AtdeccTalkerListener::sendAcmpMessage(const Acmpdu& acmpMessage)
 {
-    std::vector<uint8_t> buffer(Adpdu::Length);
-    acmpMessage.serialize(buffer.data()); // Serialize the ADPDU to the buffer
+    //std::vector<uint8_t> buffer(Adpdu::Length);
+    auto buffer = SerBuffer{};
+    //acmpMessage.serialize(buffer); // Serialize the ADPDU to the buffer
     //printBuffer(buffer);
-    sendFrame(buffer); // Send the serialized buffer over the network
+    //sendFrame(buffer); // Send the serialized buffer over the network
 }
 
 // Handle incoming ADPDU messages by deserializing and processing
@@ -534,8 +537,8 @@ void AtdeccTalkerListener::sendConnectStream()
 void AtdeccTalkerListener::sendAemResponse(const AemAecpdu& response)
 {
     std::vector<uint8_t> buffer(AemAecpdu::MAXIMUM_SEND_PAYLOAD_BUFFER_LENGTH);
-    response.serialize(buffer.data(), buffer.size()); // Serialize response into buffer
-    sendFrame(buffer); // Send the serialized buffer over the network
+    //response.serialize(buffer.data(), buffer.size()); // Serialize response into buffer
+    //sendFrame(buffer); // Send the serialized buffer over the network
 }
 
 void AtdeccTalkerListener::handleAemMessage()

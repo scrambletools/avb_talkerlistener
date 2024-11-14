@@ -170,15 +170,14 @@ static void start_talkerlistener_task(void *pvParameters) {
         ESP_LOGE(TAG, "Failed to initialize AtdeccTalkerListener: %s", esp_err_to_name(err));
         goto error;
     } else {
-        //while (true) {
-
+        while (true) {
             // Send Entity Available message
             talkerListener.sendEntityAvailable(
                 commonInfo.entityID.getValue(),
                 commonInfo.entityModelID.getValue(),
                 commonInfo.entityCapabilities.getValue()
             );
-            ESP_LOGI(TAG, "Entity Available message sent");
+            ESP_LOGI(TAG, "Entity Available message sent.");
 
             // Send Entity Departing message (for example when shutting down)
             // talkerListener.sendEntityDeparting(
@@ -194,7 +193,10 @@ static void start_talkerlistener_task(void *pvParameters) {
             // Send Connect Stream command (example of ACMP operation)
             // talkerListener.sendConnectStream();
             // ESP_LOGI(TAG, "Connect Stream command sent");
-        //}
+            
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            //ESP_LOGI(TAG, "HEAP SIZE = %d", heap_caps_get_free_size(MALLOC_CAP_8BIT) );
+        }
     }
 error:
     vTaskDelete(NULL);
